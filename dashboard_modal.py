@@ -635,12 +635,12 @@ def create_dash_app():
         
             # Main Price Chart
             fig_price = make_subplots(
-            rows=1, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.03,
-            row_heights=[1],
-        )
-        
+                rows=1, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.03,
+                row_heights=[1],
+            )
+            
             if chart_type == "candlestick":
                 fig_price.add_trace(
                     go.Candlestick(
@@ -671,20 +671,20 @@ def create_dash_app():
                     ),
                     row=1, col=1,
                 )
-        else:  # line
-            fig_price.add_trace(
-                go.Scatter(
-                    x=df["Datetime"], 
-                    y=df["Close"], 
-                    mode="lines+markers", 
-                    name="CLOSE", 
-                    line=dict(color="#7dd87d", width=2.5, shape="spline"),
-                    marker=dict(size=3, color="#7dd87d", opacity=0.6),
-                    fill="tozeroy",
-                    fillcolor="rgba(125, 216, 125, 0.1)",
-                ),
-                row=1, col=1,
-            )
+            else:  # line
+                fig_price.add_trace(
+                    go.Scatter(
+                        x=df["Datetime"], 
+                        y=df["Close"], 
+                        mode="lines+markers", 
+                        name="CLOSE", 
+                        line=dict(color="#7dd87d", width=2.5, shape="spline"),
+                        marker=dict(size=3, color="#7dd87d", opacity=0.6),
+                        fill="tozeroy",
+                        fillcolor="rgba(125, 216, 125, 0.1)",
+                    ),
+                    row=1, col=1,
+                )
             
             # Add Moving Averages
             if "MA_20" in df.columns:
