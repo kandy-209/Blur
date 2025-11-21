@@ -385,6 +385,61 @@ def create_dash_app():
                     background: linear-gradient(180deg, rgba(125, 216, 125, 0.8), rgba(255, 20, 147, 0.8));
                     box-shadow: 0 0 15px rgba(125, 216, 125, 0.5), 0 0 25px rgba(255, 20, 147, 0.3);
                 }
+                
+                /* Live indicator pulse animation */
+                @keyframes pulse {
+                    0%, 100% {
+                        opacity: 1;
+                        text-shadow: 0 0 10px #00ff41, 0 0 20px #00ff41, 0 0 30px #00ff41;
+                    }
+                    50% {
+                        opacity: 0.4;
+                        text-shadow: 0 0 5px #00ff41, 0 0 10px #00ff41;
+                    }
+                }
+                
+                #live-dot {
+                    animation: pulse 1.5s ease-in-out infinite;
+                    display: inline-block;
+                }
+                
+                /* Smooth chart transitions */
+                .js-plotly-plot {
+                    transition: opacity 0.4s ease-in-out;
+                }
+                
+                /* Fade in animation for new data */
+                @keyframes fadeIn {
+                    from {
+                        opacity: 0;
+                        transform: translateY(-5px);
+                    }
+                    to {
+                        opacity: 1;
+                        transform: translateY(0);
+                    }
+                }
+                
+                .metric-card {
+                    animation: fadeIn 0.6s ease-out;
+                }
+                
+                /* Subtle glow pulse on data updates */
+                @keyframes dataUpdate {
+                    0% {
+                        box-shadow: 0 0 20px rgba(125, 216, 125, 0.12), 0 0 40px rgba(255, 20, 147, 0.05);
+                    }
+                    50% {
+                        box-shadow: 0 0 30px rgba(125, 216, 125, 0.2), 0 0 60px rgba(0, 191, 255, 0.1);
+                    }
+                    100% {
+                        box-shadow: 0 0 20px rgba(125, 216, 125, 0.12), 0 0 40px rgba(255, 20, 147, 0.05);
+                    }
+                }
+                
+                .metric-card:has(.metric-value) {
+                    animation: fadeIn 0.6s ease-out, dataUpdate 2s ease-in-out infinite;
+                }
             </style>
         </head>
         <body>
@@ -430,7 +485,10 @@ def create_dash_app():
                         },
                     ),
                     html.Div(
-                        "SYSTEM ONLINE | DATA STREAM ACTIVE | MARKET LIVE",
+                        [
+                            html.Span("SYSTEM ONLINE | DATA STREAM ACTIVE | MARKET LIVE", id="live-indicator"),
+                            html.Span(" ●", id="live-dot", style={"color": "#00ff41", "marginLeft": "10px", "fontSize": "16px"}),
+                        ],
                         style={
                             "textAlign": "center",
                             "color": "rgba(0, 191, 255, 0.8)",
@@ -529,7 +587,7 @@ def create_dash_app():
                 ],
             ),
             
-            dcc.Interval(id="interval", interval=60 * 1000, n_intervals=0),
+            dcc.Interval(id="interval", interval=30 * 1000, n_intervals=0),  # Update every 30 seconds for more live feel
         ]
     )
 
@@ -552,6 +610,7 @@ def create_dash_app():
         try:
             period, interval = PERIOD_INTERVALS.get(interval_key, ("1d", "1m"))
             print(f"[UPDATE] Fetching data for {symbol} - Period: {period}, Interval: {interval}, Update #{n_intervals}")
+            
             df = fetch_data(symbol, period, interval)
             
             if df.empty:
@@ -612,11 +671,20 @@ def create_dash_app():
                     ),
                     row=1, col=1,
                 )
-            else:  # line
-                fig_price.add_trace(
-                    go.Scatter(x=df["Datetime"], y=df["Close"], mode="lines", name="CLOSE", line=dict(color="#7dd87d", width=2.5)),
-                    row=1, col=1,
-                )
+        else:  # line
+            fig_price.add_trace(
+                go.Scatter(
+                    x=df["Datetime"], 
+                    y=df["Close"], 
+                    mode="lines+markers", 
+                    name="CLOSE", 
+                    line=dict(color="#7dd87d", width=2.5, shape="spline"),
+                    marker=dict(size=3, color="#7dd87d", opacity=0.6),
+                    fill="tozeroy",
+                    fillcolor="rgba(125, 216, 125, 0.1)",
+                ),
+                row=1, col=1,
+            )
             
             # Add Moving Averages
             if "MA_20" in df.columns:
@@ -642,62 +710,89 @@ def create_dash_app():
                 )
             
             fig_price.update_layout(
-            title=dict(
-                text=f"{symbols[symbol]} ({symbol}) — {interval_key.upper()}",
-                font=dict(color="#7dd87d", size=18, family="'Share Tech Mono', monospace"),
-            ),
-            xaxis=dict(
-                title=dict(text="TIME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
-                tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
-                gridcolor="rgba(125, 216, 125, 0.08)",
-                linecolor="rgba(125, 216, 125, 0.4)",
-            ),
-            yaxis=dict(
-                title=dict(text="PRICE", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
-                tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
-                gridcolor="rgba(125, 216, 125, 0.08)",
-                linecolor="rgba(125, 216, 125, 0.4)",
-            ),
-            plot_bgcolor="#0a0a0a",
-            paper_bgcolor="#0a0a0a",
-            hovermode="x unified",
-            height=500,
-            font=dict(color="#7dd87d", family="'Share Tech Mono', monospace"),
+                title=dict(
+                    text=f"{symbols[symbol]} ({symbol}) — {interval_key.upper()}",
+                    font=dict(color="#7dd87d", size=18, family="'Share Tech Mono', monospace"),
+                ),
+                xaxis=dict(
+                    title=dict(text="TIME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
+                    tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
+                    gridcolor="rgba(125, 216, 125, 0.08)",
+                    linecolor="rgba(125, 216, 125, 0.4)",
+                    rangeslider=dict(visible=False),
+                ),
+                yaxis=dict(
+                    title=dict(text="PRICE", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
+                    tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
+                    gridcolor="rgba(125, 216, 125, 0.08)",
+                    linecolor="rgba(125, 216, 125, 0.4)",
+                ),
+                plot_bgcolor="#0a0a0a",
+                paper_bgcolor="#0a0a0a",
+                hovermode="x unified",
+                height=500,
+                font=dict(color="#7dd87d", family="'Share Tech Mono', monospace"),
+                # Add smooth transitions
+                transition=dict(duration=500, easing="cubic-in-out"),
+                # Auto-scroll to latest data
+                xaxis_rangeslider_visible=False,
             )
+            
+            # Add smooth animation by updating x-axis range to show latest data
+            if len(df) > 0:
+                # Show last 100 data points for better live feel
+                max_points = min(100, len(df))
+                fig_price.update_xaxes(range=[df["Datetime"].iloc[-max_points], df["Datetime"].iloc[-1]])
             
             # RSI Chart
             fig_rsi = go.Figure()
             if "RSI" in df.columns:
                 fig_rsi.add_trace(
-                    go.Scatter(x=df["Datetime"], y=df["RSI"], mode="lines", name="RSI", line=dict(color="#00bfff", width=3), fill="tozeroy", fillcolor="rgba(0, 191, 255, 0.2)"),
+                    go.Scatter(
+                        x=df["Datetime"], 
+                        y=df["RSI"], 
+                        mode="lines+markers", 
+                        name="RSI", 
+                        line=dict(color="#00bfff", width=3, shape="spline"),
+                        marker=dict(size=4, color="#00bfff", opacity=0.7),
+                        fill="tozeroy", 
+                        fillcolor="rgba(0, 191, 255, 0.2)",
+                    ),
                 )
                 fig_rsi.add_hline(y=70, line_dash="dash", line_color="rgba(255, 20, 147, 0.8)", line_width=2.5, annotation_text="OVERBOUGHT (70)", annotation_font=dict(color="#ff1493", size=11, family="'Share Tech Mono', monospace"))
                 fig_rsi.add_hline(y=30, line_dash="dash", line_color="rgba(125, 216, 125, 0.8)", line_width=2.5, annotation_text="OVERSOLD (30)", annotation_font=dict(color="#7dd87d", size=11, family="'Share Tech Mono', monospace"))
                 fig_rsi.add_hline(y=50, line_dash="dot", line_color="rgba(138, 43, 226, 0.5)", opacity=0.5, line_width=1.5)
             
             fig_rsi.update_layout(
-            title=dict(
-                text="RSI (RELATIVE STRENGTH INDEX)",
-                font=dict(color="#7dd87d", size=16, family="'Share Tech Mono', monospace"),
-            ),
-            xaxis=dict(
-                title=dict(text="TIME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
-                tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
-                gridcolor="rgba(125, 216, 125, 0.08)",
-                linecolor="rgba(125, 216, 125, 0.4)",
-            ),
-            yaxis=dict(
-                title=dict(text="RSI", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
-                tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
-                gridcolor="rgba(125, 216, 125, 0.08)",
-                linecolor="rgba(125, 216, 125, 0.4)",
-                range=[0, 100],
-            ),
-            plot_bgcolor="#0a0a0a",
-            paper_bgcolor="#0a0a0a",
-            height=300,
+                title=dict(
+                    text="RSI (RELATIVE STRENGTH INDEX)",
+                    font=dict(color="#7dd87d", size=16, family="'Share Tech Mono', monospace"),
+                ),
+                xaxis=dict(
+                    title=dict(text="TIME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
+                    tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
+                    gridcolor="rgba(125, 216, 125, 0.08)",
+                    linecolor="rgba(125, 216, 125, 0.4)",
+                ),
+                yaxis=dict(
+                    title=dict(text="RSI", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
+                    tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
+                    gridcolor="rgba(125, 216, 125, 0.08)",
+                    linecolor="rgba(125, 216, 125, 0.4)",
+                    range=[0, 100],
+                ),
+                plot_bgcolor="#0a0a0a",
+                paper_bgcolor="#0a0a0a",
+                height=300,
                 font=dict(color="#7dd87d", family="'Share Tech Mono', monospace"),
+                # Add smooth transitions
+                transition=dict(duration=500, easing="cubic-in-out"),
             )
+            
+            # Auto-scroll RSI chart to latest data
+            if len(df) > 0:
+                max_points = min(100, len(df))
+                fig_rsi.update_xaxes(range=[df["Datetime"].iloc[-max_points], df["Datetime"].iloc[-1]])
             
             # Volume Chart
             fig_volume = go.Figure()
@@ -721,23 +816,30 @@ def create_dash_app():
                     text="VOLUME",
                     font=dict(color="#7dd87d", size=16, family="'Share Tech Mono', monospace"),
                 ),
-            xaxis=dict(
-                title=dict(text="TIME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
-                tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
-                gridcolor="rgba(125, 216, 125, 0.08)",
-                linecolor="rgba(125, 216, 125, 0.4)",
-            ),
-            yaxis=dict(
-                title=dict(text="VOLUME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
-                tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
-                gridcolor="rgba(125, 216, 125, 0.08)",
-                linecolor="rgba(125, 216, 125, 0.4)",
-            ),
+                xaxis=dict(
+                    title=dict(text="TIME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
+                    tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
+                    gridcolor="rgba(125, 216, 125, 0.08)",
+                    linecolor="rgba(125, 216, 125, 0.4)",
+                ),
+                yaxis=dict(
+                    title=dict(text="VOLUME", font=dict(color="rgba(125, 216, 125, 0.7)", size=12, family="'Share Tech Mono', monospace")),
+                    tickfont=dict(color="rgba(125, 216, 125, 0.6)", size=10, family="'Share Tech Mono', monospace"),
+                    gridcolor="rgba(125, 216, 125, 0.08)",
+                    linecolor="rgba(125, 216, 125, 0.4)",
+                ),
                 plot_bgcolor="#0a0a0a",
                 paper_bgcolor="#0a0a0a",
                 height=250,
                 font=dict(color="#7dd87d", family="'Share Tech Mono', monospace"),
+                # Add smooth transitions
+                transition=dict(duration=500, easing="cubic-in-out"),
             )
+            
+            # Auto-scroll volume chart to latest data
+            if len(df) > 0:
+                max_points = min(100, len(df))
+                fig_volume.update_xaxes(range=[df["Datetime"].iloc[-max_points], df["Datetime"].iloc[-1]])
             
             # Metrics Cards
             change_class = "positive" if metrics["change"] >= 0 else "negative"
