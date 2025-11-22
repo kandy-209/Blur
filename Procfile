@@ -1,3 +1,3 @@
-web: python dashboard_modal.py
+web: python dashbord_blur.py
 
 

@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python dashboard_modal.py"
+startCommand = "python dashbord_blur.py"
 healthcheckPath = "/"
 healthcheckTimeout = 100
 restartPolicyType = "on_failure"
