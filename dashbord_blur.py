@@ -4,13 +4,89 @@ import numpy as np
 import yfinance as yf
 import dash
 from dash import dcc, html
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 import os
 import requests
 from typing import Dict, List, Optional, Tuple
+import pytz
+
+# Optional Dash auth for securing the dashboard
+try:
+    import dash_auth
+    DASH_AUTH_AVAILABLE = True
+except ImportError:
+    DASH_AUTH_AVAILABLE = False
+    print("Warning: dash-auth not available. Basic auth protection disabled.")
+
+# Macro research engine
+def _parse_macro_weights(raw: str) -> Dict[str, float]:
+    weights = {}
+    if not raw:
+        return weights
+    for chunk in raw.split(","):
+        if "=" in chunk:
+            key, val = chunk.split("=", 1)
+            try:
+                weights[key.strip().lower()] = float(val.strip())
+            except ValueError:
+                continue
+    return weights
+
+try:
+    from macro_research_algo import MacroResearchEngine
+    MACRO_ENGINE_AVAILABLE = True
+    macro_engine = MacroResearchEngine(
+        lookback=int(os.environ.get("MACRO_LOOKBACK", 90)),
+        weights=_parse_macro_weights(os.environ.get("MACRO_WEIGHTS", "")),
+        sentiment_weight=float(os.environ.get("MACRO_SENTIMENT_WEIGHT", 0.05)),
+    )
+except ImportError:
+    MACRO_ENGINE_AVAILABLE = False
+    macro_engine = None
+    print("Warning: macro_research_algo module not available")
+
+# Import indicator education module
+try:
+    from indicator_education import (
+        create_indicator_tooltip,
+        create_indicator_link,
+        get_indicator_info,
+        get_value_interpretation
+    )
+    INDICATOR_EDUCATION_AVAILABLE = True
+except ImportError:
+    INDICATOR_EDUCATION_AVAILABLE = False
+    print("Warning: indicator_education module not available")
+
+# Import dashboard enhancements
+try:
+    from dashboard_enhancements import (
+        DataExporter,
+        get_alert_system,
+        get_portfolio_tracker,
+        CorrelationAnalyzer
+    )
+    ENHANCEMENTS_AVAILABLE = True
+    data_exporter = DataExporter()
+    alert_system = get_alert_system()
+    portfolio_tracker = get_portfolio_tracker()
+    correlation_analyzer = CorrelationAnalyzer()
+except ImportError:
+    ENHANCEMENTS_AVAILABLE = False
+    print("Warning: dashboard_enhancements module not available")
+
+# Import paper trading system
+try:
+    from paper_trading import get_paper_trading_system
+    PAPER_TRADING_AVAILABLE = True
+    paper_trading = get_paper_trading_system(initial_capital=100000.0)
+except ImportError:
+    PAPER_TRADING_AVAILABLE = False
+    paper_trading = None
+    print("Warning: paper_trading module not available")
 
 # Advanced technical analysis
 try:
@@ -123,10 +199,117 @@ PERIOD_INTERVALS = {
     "1d": ("1y", "1d"),
 }
 
-def fetch_data(sym, period="1d", interval="1m"):
-    """Fetch data from Yahoo Finance with specified period and interval."""
+def is_market_closed():
+    """Check if market is closed (Friday 2pm PST to Sunday 2pm PST)."""
     try:
+        # Get current time in PST
+        pst = pytz.timezone('America/Los_Angeles')
+        now_pst = datetime.now(pst)
+        weekday = now_pst.weekday()  # 0=Monday, 4=Friday, 6=Sunday
+        hour = now_pst.hour
+        
+        # Market is closed:
+        # - Friday after 2pm PST (14:00)
+        # - All day Saturday
+        # - Sunday before 2pm PST (14:00)
+        if weekday == 4 and hour >= 14:  # Friday 2pm+
+            return True
+        elif weekday == 5:  # Saturday
+            return True
+        elif weekday == 6 and hour < 14:  # Sunday before 2pm
+            return True
+        return False
+    except Exception:
+        # If timezone fails, assume market might be closed
+        return False
+
+def get_last_week_dates():
+    """Get start and end dates for the previous trading week."""
+    try:
+        pst = pytz.timezone('America/Los_Angeles')
+        now_pst = datetime.now(pst)
+        
+        # Calculate last Monday (start of last week)
+        days_since_monday = now_pst.weekday()
+        last_monday = now_pst - timedelta(days=days_since_monday + 7)
+        last_monday = last_monday.replace(hour=9, minute=30, second=0, microsecond=0)  # Market open time
+        
+        # Calculate last Friday (end of last week)
+        last_friday = last_monday + timedelta(days=4)
+        last_friday = last_friday.replace(hour=16, minute=0, second=0, microsecond=0)  # Market close time
+        
+        return last_monday, last_friday
+    except Exception:
+        # Fallback: use 7 days ago to 2 days ago
+        end_date = datetime.now() - timedelta(days=2)
+        start_date = end_date - timedelta(days=5)
+        return start_date, end_date
+
+def fetch_data(sym, period="1d", interval="1m"):
+    """Fetch data from Yahoo Finance with specified period and interval.
+    If market is closed, fetches data from the previous trading week."""
+    try:
+        # First, try to fetch current data
         data = yf.download(sym, period=period, interval=interval, progress=False, auto_adjust=True)
+        
+        # If data is empty or market is closed, try fetching last week's data
+        market_closed = is_market_closed()
+        if data.empty or (market_closed and (data.empty or len(data) < 10)):
+            if market_closed:
+                print(f"Market is closed for {sym}. Fetching last week's data...")
+            else:
+                print(f"Insufficient data for {sym}. Fetching last week's data...")
+            start_date, end_date = get_last_week_dates()
+            
+            # For different intervals, adjust the fetch strategy
+            if interval in ["1m", "5m", "15m"]:
+                # For intraday, fetch a wider range to ensure we get enough data
+                # Fetch from last Monday to last Friday, but extend a bit for safety
+                extended_start = start_date - timedelta(days=2)
+                extended_end = end_date + timedelta(days=1)
+                data = yf.download(
+                    sym, 
+                    start=extended_start.strftime('%Y-%m-%d'),
+                    end=extended_end.strftime('%Y-%m-%d'),
+                    interval=interval,
+                    progress=False,
+                    auto_adjust=True
+                )
+                # Filter to last week's trading hours if we got data
+                if not data.empty:
+                    # Keep data from last Monday 9:30 AM to last Friday 4:00 PM PST
+                    data = data[(data.index >= start_date) & (data.index <= end_date)]
+            else:
+                # For daily/hourly, use a longer period to ensure we have data
+                # Fetch last month, then filter to last week
+                data = yf.download(
+                    sym,
+                    period="1mo",  # Get last month to ensure we have data
+                    interval=interval,
+                    progress=False,
+                    auto_adjust=True
+                )
+                # Filter to last week's range if we got data
+                if not data.empty:
+                    data = data[(data.index >= start_date) & (data.index <= end_date)]
+            
+            # If still empty after fallback, try a more aggressive approach
+            if data.empty:
+                print(f"Still no data for {sym}. Trying extended period...")
+                # Try fetching with a longer period
+                extended_periods = {
+                    "1m": "5d",
+                    "5m": "5d",
+                    "15m": "5d",
+                    "1h": "1mo",
+                    "1d": "3mo"
+                }
+                fallback_period = extended_periods.get(interval, "1mo")
+                data = yf.download(sym, period=fallback_period, interval=interval, progress=False, auto_adjust=True)
+                # If we got data, take the most recent portion
+                if not data.empty and len(data) > 100:
+                    data = data.tail(100)  # Take last 100 data points
+        
         if data.empty:
             return pd.DataFrame(columns=["Datetime", "Open", "High", "Low", "Close", "Volume"])
         
@@ -316,12 +499,11 @@ def detect_patterns(df):
         return []
     
     patterns = []
-    latest_idx = len(df) - 1  # Get the actual last index
+    latest_idx = len(df) - 1  # Use actual last index
     
     if latest_idx >= 0 and latest_idx < len(df):
-        # Get recent candles (last 5 or all available)
-        start_idx = max(0, latest_idx - 4)
-        recent = df.iloc[start_idx:latest_idx+1]
+        # Get recent candles
+        recent = df.iloc[max(0, latest_idx-4):latest_idx+1] if len(df) >= 5 else df
         
         if len(recent) >= 3:
             # Doji pattern
@@ -880,7 +1062,47 @@ def calculate_metrics(df, symbol):
 
 # ---------- DASH APP ----------
 def create_dash_app():
-    dash_app = dash.Dash(__name__, requests_pathname_prefix="/")
+    dash_app = dash.Dash(__name__, requests_pathname_prefix="/", suppress_callback_exceptions=True)
+
+    # Optional HTTP Basic Auth protection controlled via env vars
+    basic_auth_username = os.environ.get("DASH_ADMIN_USERNAME")
+    basic_auth_password = os.environ.get("DASH_ADMIN_PASSWORD")
+    if basic_auth_username and basic_auth_password:
+        if DASH_AUTH_AVAILABLE:
+            dash_auth.BasicAuth(dash_app, {basic_auth_username: basic_auth_password})
+            print("Basic authentication enabled for dashboard access.")
+        else:
+            print(
+                "Warning: DASH_ADMIN credentials provided but dash-auth is missing. "
+                "Install dash-auth or remove the credentials to disable this warning."
+            )
+    else:
+        print("Dashboard running without HTTP Basic Auth. Set DASH_ADMIN_USERNAME/PASSWORD to enable it.")
+
+    # Harden HTTP responses with a light security header middleware
+    server = dash_app.server
+    if not hasattr(server, "_security_headers_added"):
+        @server.after_request
+        def add_security_headers(response):
+            response.headers.setdefault("X-Content-Type-Options", "nosniff")
+            response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+            response.headers.setdefault("Referrer-Policy", "no-referrer-when-downgrade")
+            response.headers.setdefault(
+                "Permissions-Policy",
+                "geolocation=(), microphone=(), camera=(), fullscreen=(self)"
+            )
+            csp = (
+                "default-src 'self' data: blob: https://fonts.googleapis.com https://fonts.gstatic.com https://cdn.plot.ly; "
+                "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+                "font-src 'self' https://fonts.gstatic.com data:; "
+                "img-src 'self' data: blob: https://cdn.plot.ly; "
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.plot.ly;"
+            )
+            response.headers.setdefault("Content-Security-Policy", csp)
+            if os.environ.get("ENABLE_HSTS", "1") == "1":
+                response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+            return response
+        server._security_headers_added = True
     
     # Custom CSS styling - Dark theme with Fallout/TopStepX vibes
     dash_app.index_string = '''
@@ -902,15 +1124,30 @@ def create_dash_app():
                     font-family: 'Rajdhani', 'Courier New', monospace;
                     background: #0a0a0a;
                     background-image: 
-                        radial-gradient(circle at 20% 50%, rgba(125, 216, 125, 0.08) 0%, transparent 50%),
-                        radial-gradient(circle at 80% 80%, rgba(255, 20, 147, 0.06) 0%, transparent 50%),
-                        radial-gradient(circle at 50% 20%, rgba(0, 191, 255, 0.06) 0%, transparent 50%),
-                        linear-gradient(135deg, rgba(138, 43, 226, 0.03) 0%, transparent 50%);
+                        radial-gradient(circle at 20% 50%, rgba(125, 216, 125, 0.05) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 80%, rgba(255, 20, 147, 0.04) 0%, transparent 50%),
+                        radial-gradient(circle at 50% 20%, rgba(0, 191, 255, 0.04) 0%, transparent 50%);
                     margin: 0;
-                    padding: 20px;
+                    padding: 0;
                     color: #7dd87d;
                     min-height: 100vh;
-                    filter: blur(0.3px);
+                }
+                
+                /* Navigation Link Styles */
+                a[id^="nav-"] {
+                    transition: all 0.3s ease;
+                }
+                
+                a[id^="nav-"]:hover {
+                    backgroundColor: rgba(125, 216, 125, 0.1);
+                    borderLeft: 3px solid rgba(125, 216, 125, 0.6) !important;
+                    paddingLeft: 17px;
+                }
+                
+                /* Active navigation state */
+                a[id^="nav-"].active {
+                    backgroundColor: rgba(125, 216, 125, 0.15);
+                    borderLeft: 3px solid #7dd87d !important;
                 }
                 
                 .metric-card {
@@ -931,45 +1168,18 @@ def create_dash_app():
                     backdrop-filter: blur(3px);
                 }
                 
-                .metric-card::before {
-                    content: '';
-                    position: absolute;
-                    top: 0;
-                    left: -100%;
-                    width: 100%;
-                    height: 100%;
-                    background: linear-gradient(90deg, 
-                        transparent, 
-                        rgba(125, 216, 125, 0.1), 
-                        rgba(0, 191, 255, 0.08),
-                        rgba(255, 20, 147, 0.08),
-                        transparent);
-                    transition: left 0.6s;
-                    filter: blur(4px);
-                }
-                
-                .metric-card:hover::before {
-                    left: 100%;
-                }
-                
                 .metric-card:hover {
-                    border-color: rgba(125, 216, 125, 0.6);
-                    border-top-color: rgba(0, 191, 255, 0.6);
-                    box-shadow: 
-                        0 0 30px rgba(125, 216, 125, 0.25),
-                        0 0 60px rgba(255, 20, 147, 0.15),
-                        inset 0 0 20px rgba(125, 216, 125, 0.08);
-                    transform: translateY(-3px);
+                    border-color: rgba(125, 216, 125, 0.5);
+                    box-shadow: 0 4px 12px rgba(125, 216, 125, 0.2);
+                    transform: translateY(-2px);
                 }
                 
                 .metric-value {
-                    font-size: 28px;
+                    font-size: 26px;
                     font-weight: 600;
                     margin: 8px 0;
                     font-family: 'Share Tech Mono', monospace;
-                    text-shadow: 0 0 8px currentColor, 0 0 15px currentColor;
-                    letter-spacing: 1px;
-                    filter: blur(0.2px);
+                    letter-spacing: 0.5px;
                 }
                 
                 .metric-label {
@@ -1248,183 +1458,306 @@ def create_dash_app():
     </html>
     '''
     
+    # Import page components
+    try:
+        from pages.dashboard_page import create_dashboard_page
+        from pages.paper_trading_page import create_paper_trading_page
+        from pages.analytics_page import create_analytics_page
+        from pages.settings_page import create_settings_page
+        PAGES_AVAILABLE = True
+    except ImportError:
+        PAGES_AVAILABLE = False
+        print("Warning: Page components not available, using single-page layout")
+    
+    # Multi-page layout with sidebar navigation
     dash_app.layout = html.Div(
-        style={"maxWidth": "1600px", "margin": "0 auto", "backgroundColor": "transparent"},
-        children=[
+        [
+            dcc.Location(id="url", refresh=False),
+            # Sidebar Navigation
             html.Div(
                 [
-                    html.H1(
-                        "FUTURES TRADING TERMINAL",
-                        style={
-                            "textAlign": "center",
-                            "color": "#7dd87d",
-                            "marginBottom": "10px",
-                            "textShadow": 
-                                "0 0 20px rgba(125, 216, 125, 0.8), "
-                                "0 0 40px rgba(0, 191, 255, 0.5), "
-                                "0 0 60px rgba(255, 20, 147, 0.3), "
-                                "0 0 80px rgba(138, 43, 226, 0.2)",
-                            "fontFamily": "'Share Tech Mono', monospace",
-                            "fontSize": "38px",
-                            "letterSpacing": "4px",
-                            "fontWeight": "bold",
-                            "borderBottom": "3px solid",
-                            "borderImage": "linear-gradient(90deg, rgba(125, 216, 125, 0.6), rgba(0, 191, 255, 0.6), rgba(255, 20, 147, 0.6), rgba(138, 43, 226, 0.6)) 1",
-                            "paddingBottom": "15px",
-                            "marginBottom": "30px",
-                            "boxShadow": 
-                                "0 4px 30px rgba(125, 216, 125, 0.3), "
-                                "0 4px 50px rgba(0, 191, 255, 0.2), "
-                                "0 4px 70px rgba(255, 20, 147, 0.1)",
-                            "filter": "blur(0.5px)",
-                        },
-                    ),
-                    html.Div(
-                        [
-                            html.Span("SYSTEM ONLINE | DATA STREAM ACTIVE | MARKET LIVE", id="live-indicator"),
-                            html.Span(" ●", id="live-dot", style={"color": "#00ff41", "marginLeft": "10px", "fontSize": "16px"}),
-                        ],
-                        style={
-                            "textAlign": "center",
-                            "color": "rgba(0, 191, 255, 0.8)",
-                            "fontSize": "13px",
-                            "letterSpacing": "5px",
-                            "fontFamily": "'Share Tech Mono', monospace",
-                            "marginBottom": "30px",
-                            "opacity": "0.9",
-                            "filter": "blur(0.4px)",
-                            "textShadow": "0 0 10px rgba(0, 191, 255, 0.5), 0 0 20px rgba(255, 20, 147, 0.3)",
-                        },
-                    ),
                     html.Div(
                         [
                             html.Div(
                                 [
-                                    html.Label("SYMBOL:", style={"color": "rgba(125, 216, 125, 0.7)", "fontWeight": "600", "marginRight": "10px", "letterSpacing": "1px", "fontSize": "13px"}),
-                                    dcc.Dropdown(
-                                        id="symbol-dropdown",
-                                        options=[{"label": f"{v} ({k})", "value": k} for k, v in symbols.items()],
-                                        value="ES=F",
-                                        clearable=False,
-                                        style={"width": "250px", "backgroundColor": "#1a1a1a"},
-                                    ),
-                                ],
-                                style={"display": "inline-block", "marginRight": "20px"},
-                            ),
-                            html.Div(
-                                [
-                                    html.Label("INTERVAL:", style={"color": "rgba(125, 216, 125, 0.7)", "fontWeight": "600", "marginRight": "10px", "letterSpacing": "1px", "fontSize": "13px"}),
-                                    dcc.Dropdown(
-                                        id="interval-dropdown",
-                                        options=[
-                                            {"label": "1 MIN", "value": "1m"},
-                                            {"label": "5 MIN", "value": "5m"},
-                                            {"label": "15 MIN", "value": "15m"},
-                                            {"label": "1 HOUR", "value": "1h"},
-                                            {"label": "1 DAY", "value": "1d"},
+                                    html.Span("📈", style={"fontSize": "28px", "marginRight": "10px"}),
+                                    html.Div(
+                                        [
+                                            html.Div("FUTURES", style={"fontSize": "14px", "color": "#7dd87d", "fontWeight": "600", "lineHeight": "1.2"}),
+                                            html.Div("TRADING", style={"fontSize": "14px", "color": "#7dd87d", "fontWeight": "600", "lineHeight": "1.2"}),
                                         ],
-                                        value="1m",
-                                        clearable=False,
-                                        style={"width": "150px", "backgroundColor": "#1a1a1a"},
                                     ),
                                 ],
-                                style={"display": "inline-block", "marginRight": "20px"},
+                                style={
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "padding": "20px",
+                                    "borderBottom": "1px solid rgba(125, 216, 125, 0.2)",
+                                },
                             ),
-                            html.Div(
+                            dcc.Link(
                                 [
-                                    html.Label("CHART:", style={"color": "rgba(125, 216, 125, 0.7)", "fontWeight": "600", "marginRight": "10px", "letterSpacing": "1px", "fontSize": "13px"}),
-                                    dcc.Dropdown(
-                                        id="chart-type-dropdown",
-                                        options=[
-                                            {"label": "CANDLESTICK", "value": "candlestick"},
-                                            {"label": "LINE", "value": "line"},
-                                            {"label": "OHLC", "value": "ohlc"},
-                                        ],
-                                        value="candlestick",
-                                        clearable=False,
-                                        style={"width": "150px", "backgroundColor": "#1a1a1a"},
-                                    ),
+                                    html.Span("📊", style={"marginRight": "10px", "fontSize": "18px"}),
+                                    html.Span("Dashboard", style={"fontSize": "14px"}),
                                 ],
-                                style={"display": "inline-block"},
+                                href="/",
+                                id="nav-dashboard",
+                                style={
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "padding": "15px 20px",
+                                    "color": "#7dd87d",
+                                    "textDecoration": "none",
+                                    "borderLeft": "3px solid transparent",
+                                    "transition": "all 0.3s",
+                                },
+                            ),
+                            dcc.Link(
+                                [
+                                    html.Span("💰", style={"marginRight": "10px", "fontSize": "18px"}),
+                                    html.Span("Paper Trading", style={"fontSize": "14px"}),
+                                ],
+                                href="/paper-trading",
+                                id="nav-paper-trading",
+                                style={
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "padding": "15px 20px",
+                                    "color": "#7dd87d",
+                                    "textDecoration": "none",
+                                    "borderLeft": "3px solid transparent",
+                                    "transition": "all 0.3s",
+                                },
+                            ),
+                            dcc.Link(
+                                [
+                                    html.Span("📈", style={"marginRight": "10px", "fontSize": "18px"}),
+                                    html.Span("Analytics", style={"fontSize": "14px"}),
+                                ],
+                                href="/analytics",
+                                id="nav-analytics",
+                                style={
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "padding": "15px 20px",
+                                    "color": "#7dd87d",
+                                    "textDecoration": "none",
+                                    "borderLeft": "3px solid transparent",
+                                    "transition": "all 0.3s",
+                                },
+                            ),
+                            dcc.Link(
+                                [
+                                    html.Span("⚙️", style={"marginRight": "10px", "fontSize": "18px"}),
+                                    html.Span("Settings", style={"fontSize": "14px"}),
+                                ],
+                                href="/settings",
+                                id="nav-settings",
+                                style={
+                                    "display": "flex",
+                                    "alignItems": "center",
+                                    "padding": "15px 20px",
+                                    "color": "#7dd87d",
+                                    "textDecoration": "none",
+                                    "borderLeft": "3px solid transparent",
+                                    "transition": "all 0.3s",
+                                },
                             ),
                         ],
-                        style={"textAlign": "center", "marginBottom": "20px"},
+                        style={"marginTop": "10px"},
                     ),
-                ]
-            ),
-            
-            # Trading Signal Display
-            html.Div(
-                id="trading-signal-container",
-                style={"marginBottom": "30px"},
-            ),
-            
-            # Metrics Cards - Reorganized into sections
-            html.Div(
-                id="metrics-container",
-                style={"marginBottom": "30px"},
-            ),
-            
-            # Main Chart
-            html.Div(
-                [
-                    dcc.Graph(id="price-graph", style={"height": "500px", "backgroundColor": "#0a0a0a", "border": "1px solid rgba(125, 216, 125, 0.4)", "borderRadius": "4px", "padding": "15px", "boxShadow": "0 0 20px rgba(125, 216, 125, 0.15)", "backdropFilter": "blur(2px)"}),
                 ],
-                style={"marginBottom": "20px"},
+                style={
+                    "position": "fixed",
+                    "left": 0,
+                    "top": 0,
+                    "width": "250px",
+                    "height": "100vh",
+                    "backgroundColor": "#0f0f0f",
+                    "borderRight": "1px solid rgba(125, 216, 125, 0.2)",
+                    "overflowY": "auto",
+                    "zIndex": "1000",
+                },
             ),
-            
-            # RSI Chart
+            # Main Content Area
             html.Div(
-                [
-                    dcc.Graph(id="rsi-graph", style={"height": "300px", "backgroundColor": "rgba(10, 10, 10, 0.95)", "border": "1px solid rgba(125, 216, 125, 0.4)", "borderTop": "3px solid rgba(255, 20, 147, 0.6)", "borderRadius": "6px", "padding": "15px", "boxShadow": "0 0 25px rgba(255, 20, 147, 0.2), 0 0 50px rgba(138, 43, 226, 0.1)", "backdropFilter": "blur(3px)"}),
-                ],
-                style={"marginBottom": "20px"},
+                id="page-content",
+                style={
+                    "marginLeft": "250px",
+                    "padding": "20px",
+                    "minHeight": "100vh",
+                    "backgroundColor": "#0a0a0a",
+                },
             ),
-            
-            # MACD Chart
+            # Global components (modals, stores, intervals)
+            dcc.Store(id="indicator-modal-store", data={"open": False, "indicator": None}),
             html.Div(
-                [
-                    dcc.Graph(id="macd-graph", style={"height": "300px", "backgroundColor": "rgba(10, 10, 10, 0.95)", "border": "1px solid rgba(125, 216, 125, 0.4)", "borderTop": "3px solid rgba(0, 191, 255, 0.6)", "borderRadius": "6px", "padding": "15px", "boxShadow": "0 0 25px rgba(0, 191, 255, 0.2), 0 0 50px rgba(138, 43, 226, 0.1)", "backdropFilter": "blur(3px)"}),
-                ],
-                style={"marginBottom": "20px"},
+                id="indicator-education-modal",
+                style={"display": "none"}
             ),
-            
-            # Stochastic Chart
-            html.Div(
-                [
-                    dcc.Graph(id="stoch-graph", style={"height": "300px", "backgroundColor": "rgba(10, 10, 10, 0.95)", "border": "1px solid rgba(125, 216, 125, 0.4)", "borderTop": "3px solid rgba(255, 20, 147, 0.6)", "borderRadius": "6px", "padding": "15px", "boxShadow": "0 0 25px rgba(255, 20, 147, 0.2), 0 0 50px rgba(138, 43, 226, 0.1)", "backdropFilter": "blur(3px)"}),
-                ],
-                style={"marginBottom": "20px"},
-            ),
-            
-            # Volume Chart
-            html.Div(
-                [
-                    dcc.Graph(id="volume-graph", style={"height": "250px", "backgroundColor": "rgba(10, 10, 10, 0.95)", "border": "1px solid rgba(125, 216, 125, 0.4)", "borderTop": "3px solid rgba(138, 43, 226, 0.6)", "borderRadius": "6px", "padding": "15px", "boxShadow": "0 0 25px rgba(138, 43, 226, 0.2), 0 0 50px rgba(0, 191, 255, 0.1)", "backdropFilter": "blur(3px)"}),
-                ],
-            ),
-            
-            # ML Predictions & Advanced Analytics
-            html.Div(
-                id="ml-predictions-container",
-                style={"marginBottom": "20px"},
-            ),
-            
-            # Market News & Sentiment
-            html.Div(
-                id="news-container",
-                style={"marginBottom": "20px"},
-            ),
-            
-            # Economic Indicators
-            html.Div(
-                id="economic-indicators-container",
-                style={"marginBottom": "20px"},
-            ),
-            
-            dcc.Interval(id="interval", interval=30 * 1000, n_intervals=0),  # Update every 30 seconds for more live feel
-        ]
+            dcc.Store(id="current-data-store", data={}),
+            dcc.Store(id="current-metrics-store", data={}),
+            dcc.Interval(id="interval", interval=30 * 1000, n_intervals=0),
+        ],
+        style={"display": "flex"},
     )
+    
+    # Page routing callback
+    @dash_app.callback(
+        Output("page-content", "children"),
+        [Input("url", "pathname")],
+    )
+    def display_page(pathname):
+        if pathname == "/paper-trading":
+            if PAGES_AVAILABLE:
+                return create_paper_trading_page()
+            else:
+                return html.Div("Paper Trading page not available")
+        elif pathname == "/analytics":
+            if PAGES_AVAILABLE:
+                return create_analytics_page()
+            else:
+                return html.Div("Analytics page not available")
+        elif pathname == "/settings":
+            if PAGES_AVAILABLE:
+                return create_settings_page()
+            else:
+                return html.Div("Settings page not available")
+        else:  # Default to dashboard
+            if PAGES_AVAILABLE:
+                return create_dashboard_page(symbols)
+            else:
+                return html.Div("Dashboard page not available. Please ensure pages/ directory exists.")
+    
+    # Callback for indicator education modal
+    @dash_app.callback(
+        [Output("indicator-education-modal", "children"),
+         Output("indicator-education-modal", "style")],
+        [Input("rsi-learn-link", "n_clicks"),
+         Input("macd-learn-link", "n_clicks"),
+         Input("stoch-learn-link", "n_clicks"),
+         Input("close-modal", "n_clicks")],
+        [State("indicator-education-modal", "style")],
+        prevent_initial_call=True
+    )
+    def toggle_indicator_education(rsi_clicks, macd_clicks, stoch_clicks, close_clicks, current_style):
+        """Show/hide indicator education modal."""
+        from dash import callback_context
+        
+        ctx = callback_context
+        if not ctx.triggered:
+            return html.Div(), {"display": "none"}
+        
+        button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+        
+        # Close modal
+        if button_id == "close-modal" and close_clicks:
+            return html.Div(), {"display": "none"}
+        
+        # Open modal for specific indicator
+        indicator_map = {
+            "rsi-learn-link": "RSI",
+            "macd-learn-link": "MACD",
+            "stoch-learn-link": "Stochastic"
+        }
+        
+        indicator_name = indicator_map.get(button_id)
+        if not indicator_name or not INDICATOR_EDUCATION_AVAILABLE:
+            return html.Div(), {"display": "none"}
+        
+        info = get_indicator_info(indicator_name)
+        if not info:
+            return html.Div(), {"display": "none"}
+        
+        modal_content = html.Div([
+            html.Div([
+                html.Div([
+                    html.H2(
+                        info['name'],
+                        style={
+                            "color": "#7dd87d",
+                            "fontFamily": "'Share Tech Mono', monospace",
+                            "marginBottom": "20px"
+                        }
+                    ),
+                    html.Button(
+                        "X",
+                        id="close-modal",
+                        n_clicks=0,
+                        style={
+                            "position": "absolute",
+                            "top": "10px",
+                            "right": "10px",
+                            "backgroundColor": "transparent",
+                            "border": "1px solid rgba(125, 216, 125, 0.5)",
+                            "color": "#7dd87d",
+                            "fontSize": "20px",
+                            "cursor": "pointer",
+                            "width": "30px",
+                            "height": "30px",
+                            "borderRadius": "4px"
+                        }
+                    ),
+                    html.Div([
+                        html.H3("Description", style={"color": "#7dd87d", "fontSize": "16px", "marginTop": "15px"}),
+                        html.P(
+                            info['description'],
+                            style={"color": "rgba(125, 216, 125, 0.8)", "fontSize": "13px", "lineHeight": "1.6"}
+                        ),
+                        html.H3("Range", style={"color": "#7dd87d", "fontSize": "16px", "marginTop": "15px"}),
+                        html.P(
+                            f"Typical Range: {info['range']}",
+                            style={"color": "rgba(125, 216, 125, 0.8)", "fontSize": "13px"}
+                        ),
+                        html.H3("How to Interpret", style={"color": "#7dd87d", "fontSize": "16px", "marginTop": "15px"}),
+                        html.Ul([
+                            html.Li([
+                                html.Strong(key.replace('_', ' ').title() + ":", style={"color": "#7dd87d"}),
+                                html.Span(f" {value}", style={"color": "rgba(125, 216, 125, 0.8)"})
+                            ])
+                            for key, value in info['interpretation'].items()
+                        ], style={"color": "rgba(125, 216, 125, 0.8)", "fontSize": "12px", "lineHeight": "1.8"}),
+                        html.H3("Best Use Cases", style={"color": "#7dd87d", "fontSize": "16px", "marginTop": "15px"}),
+                        html.P(
+                            info['best_use'],
+                            style={"color": "rgba(125, 216, 125, 0.8)", "fontSize": "13px", "lineHeight": "1.6"}
+                        ),
+                    ])
+                ], style={
+                    "position": "relative",
+                    "backgroundColor": "#0a0a0a",
+                    "border": "2px solid rgba(125, 216, 125, 0.5)",
+                    "borderRadius": "8px",
+                    "padding": "30px",
+                    "maxWidth": "700px",
+                    "maxHeight": "80vh",
+                    "overflowY": "auto"
+                })
+            ], style={
+                "position": "fixed",
+                "top": "50%",
+                "left": "50%",
+                "transform": "translate(-50%, -50%)",
+                "zIndex": "1000",
+                "width": "90%",
+                "maxWidth": "800px"
+            }),
+            html.Div(
+                id="modal-backdrop",
+                n_clicks=0,
+                style={
+                    "position": "fixed",
+                    "top": "0",
+                    "left": "0",
+                    "width": "100%",
+                    "height": "100%",
+                    "backgroundColor": "rgba(0, 0, 0, 0.8)",
+                    "zIndex": "999"
+                }
+            )
+        ])
+        
+        return modal_content, {"display": "block"}
 
     @dash_app.callback(
         [
@@ -1433,12 +1766,20 @@ def create_dash_app():
             Output("macd-graph", "figure"),
             Output("stoch-graph", "figure"),
             Output("volume-graph", "figure"),
+            Output("market-status-banner", "children"),
             Output("trading-signal-container", "children"),
             Output("metrics-container", "children"),
             Output("ml-predictions-container", "children"),
             Output("news-container", "children"),
             Output("economic-indicators-container", "children"),
-        ],
+            Output("macro-research-container", "children"),
+            Output("rsi-education", "children"),
+            Output("macd-education", "children"),
+            Output("stoch-education", "children"),
+        ] + ([
+            Output("current-data-store", "data"),
+            Output("current-metrics-store", "data"),
+        ] if ENHANCEMENTS_AVAILABLE else []),
         [
             Input("symbol-dropdown", "value"),
             Input("interval-dropdown", "value"),
@@ -1454,6 +1795,32 @@ def create_dash_app():
             
             df = fetch_data(symbol, period, interval)
             
+            # Check if market is closed and show banner
+            market_closed = is_market_closed()
+            market_status_banner = html.Div()  # Default: no banner
+            if market_closed and not df.empty:
+                # Show banner indicating we're displaying last week's data
+                start_date, end_date = get_last_week_dates()
+                market_status_banner = html.Div(
+                    [
+                        html.Div(
+                            f"⚠️ Market is closed. Displaying data from last trading week ({start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')})",
+                            style={
+                                "backgroundColor": "rgba(255, 165, 0, 0.2)",
+                                "border": "1px solid rgba(255, 165, 0, 0.5)",
+                                "borderRadius": "8px",
+                                "padding": "12px 20px",
+                                "textAlign": "center",
+                                "color": "#ffa500",
+                                "fontSize": "14px",
+                                "fontWeight": "500",
+                                "backdropFilter": "blur(10px)",
+                                "boxShadow": "0 0 15px rgba(255, 165, 0, 0.3)",
+                            }
+                        )
+                    ]
+                )
+            
             if df.empty:
                 print(f"[WARNING] No data returned for {symbol}")
                 empty_fig = {
@@ -1468,7 +1835,7 @@ def create_dash_app():
                     f"No data available for {symbol}. Market may be closed or symbol unavailable.",
                     style={"color": "#ff6b6b", "textAlign": "center", "padding": "20px"}
                 )
-                return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, error_msg, error_msg, error_msg, error_msg, error_msg
+                return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, html.Div(), error_msg, error_msg, error_msg, error_msg, error_msg, html.Div(), html.Div(), html.Div(), html.Div()
             
             print(f"[SUCCESS] Fetched {len(df)} rows for {symbol}")
             
@@ -1914,6 +2281,23 @@ def create_dash_app():
                                                 style={"color": "#ff1744" if metrics["rsi"] > 70 else "#00c853" if metrics["rsi"] < 30 else "#667eea"},
                                             ),
                                             html.Div("RSI", className="metric-label"),
+                                            html.Div(
+                                                "Range: 0-100 | " + ("Overbought" if metrics["rsi"] > 70 else "Oversold" if metrics["rsi"] < 30 else "Neutral"),
+                                                style={"color": "rgba(125, 216, 125, 0.6)", "fontSize": "10px", "marginTop": "5px", "fontStyle": "italic"}
+                                            ) if INDICATOR_EDUCATION_AVAILABLE else html.Div(),
+                                            html.A(
+                                                "📚 Learn More",
+                                                href="#",
+                                                id="rsi-learn-link",
+                                                style={
+                                                    "color": "#7dd87d",
+                                                    "textDecoration": "underline",
+                                                    "fontSize": "10px",
+                                                    "marginTop": "3px",
+                                                    "display": "block",
+                                                    "cursor": "pointer"
+                                                }
+                                            ) if INDICATOR_EDUCATION_AVAILABLE else html.Div(),
                                         ],
                                         className="metric-card",
                                     ),
@@ -1925,6 +2309,23 @@ def create_dash_app():
                                                 style={"color": "#00bfff"},
                                             ),
                                             html.Div("MACD", className="metric-label"),
+                                            html.Div(
+                                                "Oscillates around zero | Shows momentum",
+                                                style={"color": "rgba(125, 216, 125, 0.6)", "fontSize": "10px", "marginTop": "5px", "fontStyle": "italic"}
+                                            ) if INDICATOR_EDUCATION_AVAILABLE else html.Div(),
+                                            html.A(
+                                                "📚 Learn More",
+                                                href="#",
+                                                id="macd-learn-link",
+                                                style={
+                                                    "color": "#7dd87d",
+                                                    "textDecoration": "underline",
+                                                    "fontSize": "10px",
+                                                    "marginTop": "3px",
+                                                    "display": "block",
+                                                    "cursor": "pointer"
+                                                }
+                                            ) if INDICATOR_EDUCATION_AVAILABLE else html.Div(),
                                         ],
                                         className="metric-card",
                                     ),
@@ -1936,6 +2337,23 @@ def create_dash_app():
                                                 style={"color": "#ff1493"},
                                             ),
                                             html.Div("Stoch %K", className="metric-label"),
+                                            html.Div(
+                                                "Range: 0-100 | " + ("Overbought" if metrics.get('stoch_k', 50) > 80 else "Oversold" if metrics.get('stoch_k', 50) < 20 else "Neutral"),
+                                                style={"color": "rgba(125, 216, 125, 0.6)", "fontSize": "10px", "marginTop": "5px", "fontStyle": "italic"}
+                                            ) if INDICATOR_EDUCATION_AVAILABLE else html.Div(),
+                                            html.A(
+                                                "📚 Learn More",
+                                                href="#",
+                                                id="stoch-learn-link",
+                                                style={
+                                                    "color": "#7dd87d",
+                                                    "textDecoration": "underline",
+                                                    "fontSize": "10px",
+                                                    "marginTop": "3px",
+                                                    "display": "block",
+                                                    "cursor": "pointer"
+                                                }
+                                            ) if INDICATOR_EDUCATION_AVAILABLE else html.Div(),
                                         ],
                                         className="metric-card",
                                     ),
@@ -2095,7 +2513,7 @@ def create_dash_app():
                                         html.Div(
                                             [
                                                 html.Span(f"Sentiment: {sentiment_label}", style={"color": sentiment_color, "fontSize": "11px", "marginRight": "15px"}),
-                                                html.A("Read More", href=article.get("url", "#"), target="_blank", style={"color": "#00bfff", "fontSize": "11px", "textDecoration": "none"}),
+                                                html.Span(f"Source: {article.get('source', {}).get('name', 'Pro Feed')}", style={"color": "#00bfff", "fontSize": "11px"}),
                                             ],
                                             style={"display": "flex", "justifyContent": "space-between"},
                                         ),
@@ -2168,8 +2586,248 @@ def create_dash_app():
                         "margin": "20px 0",
                     },
                 )
+
+            # Macro Research Component
+            macro_component = html.Div()
+            if MACRO_ENGINE_AVAILABLE and macro_engine:
+                macro_result = macro_engine.run(
+                    symbol,
+                    df,
+                    economic_data,
+                    overall_sentiment if news_sentiment else None,
+                )
+                if macro_result:
+                    history_df = macro_result.get("history")
+                    macro_fig = go.Figure()
+                    if history_df is not None and not history_df.empty:
+                        macro_fig.add_trace(
+                            go.Scatter(
+                                x=history_df["Datetime"],
+                                y=history_df["score"],
+                                mode="lines",
+                                line=dict(color="#7dd87d", width=3, shape="spline"),
+                                name="Composite Score",
+                            )
+                        )
+                        macro_fig.add_hline(y=25, line_dash="dot", line_color="#00c853", opacity=0.4)
+                        macro_fig.add_hline(y=-25, line_dash="dot", line_color="#ff6b6b", opacity=0.4)
+                        macro_fig.update_layout(
+                            margin=dict(l=0, r=0, t=30, b=0),
+                            height=260,
+                            plot_bgcolor="#0a0a0a",
+                            paper_bgcolor="#0a0a0a",
+                            font=dict(color="#7dd87d", family="'Share Tech Mono', monospace"),
+                            title=dict(
+                                text="Adaptive Macro Factor Fusion",
+                                font=dict(size=16),
+                            ),
+                            yaxis=dict(range=[-105, 105], gridcolor="rgba(125, 216, 125, 0.08)"),
+                            xaxis=dict(gridcolor="rgba(125, 216, 125, 0.08)"),
+                        )
+                    factor_cards = []
+                    for factor in macro_result.get("factors", []):
+                        factor_cards.append(
+                            html.Div(
+                                [
+                                    html.Div(f"{factor['value']:+.1f}", className="metric-value", style={"color": "#00bfff"}),
+                                    html.Div(factor["name"].upper(), className="metric-label"),
+                                    html.Div(
+                                        f"Weight: {factor['weight']*100:.0f}%",
+                                        style={"fontSize": "10px", "color": "rgba(125, 216, 125, 0.6)", "marginTop": "5px"},
+                                    ),
+                                ],
+                                className="metric-card",
+                            )
+                        )
+                    weights_badges = []
+                    for name, value in (macro_result.get("weights") or {}).items():
+                        weights_badges.append(
+                            html.Div(
+                                [
+                                    html.Div(f"{name.upper()}", style={"fontSize": "10px", "fontWeight": "600"}),
+                                    html.Div(f"{value*100:.0f}%", style={"fontSize": "12px", "color": "#7dd87d"}),
+                                ],
+                                className="metric-card",
+                                style={"minWidth": "110px"},
+                            )
+                        )
+                    scenario_cards = []
+                    for scenario in macro_result.get("scenarios", []):
+                        scenario_cards.append(
+                            html.Div(
+                                [
+                                    html.Div(scenario.name, style={"fontWeight": "600", "marginBottom": "5px"}),
+                                    html.Div(scenario.narrative, style={"fontSize": "12px", "color": "rgba(125, 216, 125, 0.7)", "marginBottom": "8px"}),
+                                    html.Div(f"Projected Score: {scenario.projected_score:+.1f}", style={"color": "#7dd87d", "fontSize": "12px"}),
+                                ],
+                                className="metric-card",
+                                style={"minHeight": "140px"},
+                            )
+                        )
+                    backtest = macro_result.get("backtest")
+                    backtest_fig = go.Figure()
+                    backtest_stats_cards = []
+                    if backtest and backtest.get("curve") is not None and not backtest["curve"].empty:
+                        curve_df = backtest["curve"]
+                        backtest_fig.add_trace(
+                            go.Scatter(
+                                x=curve_df["Datetime"],
+                                y=curve_df["Strategy"],
+                                mode="lines",
+                                name="Macro Strategy",
+                                line=dict(color="#7dd87d", width=2.5),
+                            )
+                        )
+                        backtest_fig.add_trace(
+                            go.Scatter(
+                                x=curve_df["Datetime"],
+                                y=curve_df["BuyHold"],
+                                mode="lines",
+                                name="Buy & Hold",
+                                line=dict(color="#ff6b6b", width=1.5, dash="dot"),
+                            )
+                        )
+                        backtest_fig.update_layout(
+                            margin=dict(l=0, r=0, t=30, b=0),
+                            height=260,
+                            plot_bgcolor="#0a0a0a",
+                            paper_bgcolor="#0a0a0a",
+                            font=dict(color="#7dd87d", family="'Share Tech Mono', monospace"),
+                            title=dict(text="Macro Strategy Backtest", font=dict(size=16)),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                            yaxis=dict(gridcolor="rgba(125, 216, 125, 0.08)"),
+                            xaxis=dict(gridcolor="rgba(125, 216, 125, 0.08)"),
+                        )
+                        stats = backtest.get("stats", {})
+                        stat_mappings = [
+                            ("Hit Ratio", f"{stats.get('hit_ratio', 0):.1f}%"),
+                            ("Trades", str(stats.get("trades", 0))),
+                            ("Strategy CAGR", f"{stats.get('strategy_cagr', 0):.1f}%"),
+                            ("Sharpe", f"{stats.get('sharpe', 0):.2f}"),
+                        ]
+                        for label, value in stat_mappings:
+                            backtest_stats_cards.append(
+                                html.Div(
+                                    [
+                                        html.Div(value, className="metric-value", style={"color": "#7dd87d"}),
+                                        html.Div(label.upper(), className="metric-label"),
+                                    ],
+                                    className="metric-card",
+                                )
+                            )
+
+                    research_notes = macro_result.get("research_notes", [])
+                    macro_component = html.Div(
+                        [
+                            html.Div("MACRO RESEARCH LAB", className="metrics-section-title"),
+                            html.Div(
+                                [
+                                    html.Div(
+                                        [
+                                            html.Div(f"{macro_result['score']:+.1f}", className="metric-value", style={"color": "#7dd87d"}),
+                                            html.Div("Composite Score", className="metric-label"),
+                                            html.Div(
+                                                macro_result["regime"],
+                                                style={"fontSize": "12px", "color": "#00bfff", "marginTop": "5px"},
+                                            ),
+                                        ],
+                                        className="metric-card",
+                                    ),
+                                ],
+                                className="metrics-grid",
+                            ),
+                            html.Div(factor_cards, className="metrics-grid"),
+                            html.Div(weights_badges, className="metrics-grid") if weights_badges else html.Div(),
+                            dcc.Graph(figure=macro_fig) if history_df is not None and not history_df.empty else html.Div(),
+                            html.Div(backtest_stats_cards, className="metrics-grid") if backtest_stats_cards else html.Div(),
+                            dcc.Graph(figure=backtest_fig) if backtest_stats_cards else html.Div(),
+                            html.Div(
+                                scenario_cards,
+                                className="metrics-grid",
+                                style={"marginTop": "15px"},
+                            ),
+                            html.Div(
+                                [
+                                    html.Div("Research Notes", style={"fontWeight": "600", "marginBottom": "5px"}),
+                                    html.Ul(
+                                        [
+                                            html.Li(note, style={"fontSize": "12px", "color": "rgba(125, 216, 125, 0.8)"})
+                                            for note in research_notes
+                                        ]
+                                    ),
+                                ],
+                                style={"marginTop": "15px"},
+                            ),
+                        ],
+                        className="metrics-section",
+                        style={
+                            "background": "linear-gradient(135deg, rgba(26, 26, 26, 0.95) 0%, rgba(15, 15, 15, 0.95) 100%)",
+                            "border": "1px solid rgba(0, 191, 255, 0.4)",
+                            "borderRadius": "6px",
+                            "padding": "20px",
+                            "margin": "20px 0",
+                        },
+                    )
             
-            return fig_price, fig_rsi, fig_macd, fig_stoch, fig_volume, trading_signal_display, metrics_cards, ml_component, news_component, econ_component
+            # Create educational content for indicators
+            rsi_education = html.Div()
+            macd_education = html.Div()
+            stoch_education = html.Div()
+            
+            if INDICATOR_EDUCATION_AVAILABLE and len(df) > 0:
+                # Get latest RSI value
+                latest_rsi = metrics.get('rsi', 50) if 'rsi' in metrics else 50
+                rsi_education = create_indicator_link("RSI", latest_rsi)
+                
+                # Get latest MACD value
+                latest_macd = metrics.get('macd', 0) if 'macd' in metrics else 0
+                macd_education = create_indicator_link("MACD", latest_macd)
+                
+                # Get latest Stochastic value
+                latest_stoch = metrics.get('stoch_k', 50) if 'stoch_k' in metrics else 50
+                stoch_education = create_indicator_link("Stochastic", latest_stoch)
+            
+            # Check alerts if enhancements available
+            if ENHANCEMENTS_AVAILABLE:
+                # Check RSI alerts
+                if 'rsi' in metrics:
+                    alert_system.check_alert(">", metrics['rsi'], 70, symbol, "warning")
+                    alert_system.check_alert("<", metrics['rsi'], 30, symbol, "info")
+                
+                # Check price change alerts
+                if 'change_pct' in metrics:
+                    alert_system.check_alert(">", abs(metrics['change_pct']), 2.0, symbol, "info")
+                
+                # Store data for export
+                data_store = {"df": df.to_dict('records') if not df.empty else []}
+                metrics_store = metrics
+            else:
+                data_store = {}
+                metrics_store = {}
+            
+            # Return values matching the callback outputs
+            base_returns = (
+                fig_price,
+                fig_rsi,
+                fig_macd,
+                fig_stoch,
+                fig_volume,
+                market_status_banner,
+                trading_signal_display,
+                metrics_cards,
+                ml_component,
+                news_component,
+                econ_component,
+                macro_component,
+                rsi_education,
+                macd_education,
+                stoch_education,
+            )
+            
+            if ENHANCEMENTS_AVAILABLE:
+                return base_returns + (data_store, metrics_store)
+            else:
+                return base_returns
         except Exception as e:
             print(f"[ERROR] Exception in update_all: {e}")
             import traceback
@@ -2186,7 +2844,488 @@ def create_dash_app():
                 f"Error: {str(e)}",
                 style={"color": "#ff6b6b", "textAlign": "center", "padding": "20px"}
             )
-            return error_fig, error_fig, error_fig, error_fig, error_fig, error_msg, error_msg, error_msg, error_msg, error_msg
+            # Error return values matching the callback outputs
+            error_base_returns = (
+                error_fig,
+                error_fig,
+                error_fig,
+                error_fig,
+                error_fig,
+                html.Div(),
+                error_msg,
+                error_msg,
+                error_msg,
+                error_msg,
+                error_msg,
+                html.Div(),
+                html.Div(),
+                html.Div(),
+                html.Div(),
+            )
+            
+            if ENHANCEMENTS_AVAILABLE:
+                return error_base_returns + ({}, {})
+            else:
+                return error_base_returns
+    
+    # Enhancement callbacks
+    if ENHANCEMENTS_AVAILABLE:
+        @dash_app.callback(
+            Output("export-status", "children"),
+            [Input("export-csv-btn", "n_clicks"),
+             Input("export-json-btn", "n_clicks")],
+            [State("current-data-store", "data"),
+             State("current-metrics-store", "data")],
+            prevent_initial_call=True,
+        )
+        def handle_export(csv_clicks, json_clicks, data_store, metrics_store):
+            from dash import callback_context
+            ctx = callback_context
+            if not ctx.triggered:
+                return ""
+            
+            button_id = ctx.triggered[0]["prop_id"].split(".")[0]
+            
+            try:
+                if button_id == "export-csv-btn" and csv_clicks:
+                    if data_store and "df" in data_store:
+                        import pandas as pd
+                        df = pd.DataFrame(data_store["df"])
+                        filepath = data_exporter.export_to_csv(df)
+                        return f"Exported to: {filepath}"
+                    return "No data available to export"
+                
+                elif button_id == "export-json-btn" and json_clicks:
+                    if data_store and "df" in data_store:
+                        import pandas as pd
+                        df = pd.DataFrame(data_store["df"])
+                        filepath = data_exporter.export_to_json(df)
+                        return f"Exported to: {filepath}"
+                    return "No data available to export"
+            except Exception as e:
+                return f"Export error: {str(e)}"
+            
+            return ""
+        
+        @dash_app.callback(
+            Output("alerts-container", "children"),
+            [Input("interval", "n_intervals")],
+            [State("symbol-dropdown", "value"),
+             State("metrics-container", "children")],
+            prevent_initial_call=False,
+        )
+        def update_alerts(n_intervals, symbol, metrics_children):
+            if not symbol:
+                return html.Div()
+            
+            # Check common alert conditions
+            # This would need access to current metrics - simplified for now
+            active_alerts = alert_system.get_active_alerts(limit=5)
+            
+            if not active_alerts:
+                return html.Div()
+            
+            alert_items = []
+            for alert in active_alerts:
+                alert_color = {
+                    "info": "#00bfff",
+                    "warning": "#ffa500",
+                    "danger": "#ff6b6b",
+                    "success": "#7dd87d"
+                }.get(alert["type"], "#7dd87d")
+                
+                alert_items.append(
+                    html.Div(
+                        [
+                            html.Div(alert["message"], style={"color": alert_color, "fontSize": "12px"}),
+                            html.Div(
+                                alert["timestamp"][:19],
+                                style={"color": "rgba(125, 216, 125, 0.6)", "fontSize": "10px", "marginTop": "3px"}
+                            ),
+                        ],
+                        style={
+                            "padding": "10px",
+                            "border": f"1px solid {alert_color}",
+                            "borderRadius": "4px",
+                            "marginBottom": "5px",
+                            "backgroundColor": "rgba(10, 10, 10, 0.8)",
+                        }
+                    )
+                )
+            
+            return html.Div(
+                [
+                    html.Div("ACTIVE ALERTS", className="metrics-section-title"),
+                    html.Div(alert_items),
+                ],
+                className="metrics-section",
+                style={
+                    "background": "linear-gradient(135deg, rgba(26, 26, 26, 0.95) 0%, rgba(15, 15, 15, 0.95) 100%)",
+                    "border": "1px solid rgba(255, 165, 0, 0.4)",
+                    "borderRadius": "6px",
+                    "padding": "20px",
+                    "margin": "20px 0",
+                },
+            )
+        
+        @dash_app.callback(
+            Output("portfolio-container", "children"),
+            [Input("interval", "n_intervals")],
+            prevent_initial_call=False,
+        )
+        def update_portfolio(n_intervals):
+            positions = portfolio_tracker.get_positions()
+            
+            if not positions:
+                return html.Div(
+                    [
+                        html.Div("PORTFOLIO TRACKER", className="metrics-section-title"),
+                        html.Div(
+                            "No positions tracked. Add positions via API or manual entry.",
+                            style={"color": "rgba(125, 216, 125, 0.6)", "textAlign": "center", "padding": "20px"},
+                        ),
+                    ],
+                    className="metrics-section",
+                    style={
+                        "background": "linear-gradient(135deg, rgba(26, 26, 26, 0.95) 0%, rgba(15, 15, 15, 0.95) 100%)",
+                        "border": "1px solid rgba(138, 43, 226, 0.4)",
+                        "borderRadius": "6px",
+                        "padding": "20px",
+                        "margin": "20px 0",
+                    },
+                )
+            
+            position_cards = []
+            for symbol, pos in positions.items():
+                position_cards.append(
+                    html.Div(
+                        [
+                            html.Div(symbol, style={"fontWeight": "600", "color": "#7dd87d", "marginBottom": "5px"}),
+                            html.Div(f"Qty: {pos['quantity']:.2f}", style={"fontSize": "12px", "color": "rgba(125, 216, 125, 0.8)"}),
+                            html.Div(f"Entry: ${pos['entry_price']:.2f}", style={"fontSize": "12px", "color": "rgba(125, 216, 125, 0.8)"}),
+                        ],
+                        className="metric-card",
+                    )
+                )
+            
+            return html.Div(
+                [
+                    html.Div("PORTFOLIO TRACKER", className="metrics-section-title"),
+                    html.Div(position_cards, className="metrics-grid"),
+                ],
+                className="metrics-section",
+                style={
+                    "background": "linear-gradient(135deg, rgba(26, 26, 26, 0.95) 0%, rgba(15, 15, 15, 0.95) 100%)",
+                    "border": "1px solid rgba(138, 43, 226, 0.4)",
+                    "borderRadius": "6px",
+                    "padding": "20px",
+                    "margin": "20px 0",
+                },
+            )
+    
+    # Paper Trading Callbacks
+    if PAPER_TRADING_AVAILABLE:
+        @dash_app.callback(
+            Output("paper-trading-container", "children"),
+            [
+                Input("interval", "n_intervals"),
+                Input("place-order-btn", "n_clicks"),
+            ],
+            [
+                State("symbol-dropdown", "value"),
+                State("order-side", "value"),
+                State("order-quantity", "value"),
+                State("order-price", "value"),
+                State("current-data-store", "data"),
+            ],
+            prevent_initial_call=False,
+        )
+        def update_paper_trading(n_intervals, place_order_clicks, symbol, order_side, order_quantity, order_price, data_store):
+            from dash import callback_context
+            
+            ctx = callback_context
+            error_msg = ""
+            success_msg = ""
+            
+            # Handle order placement
+            if ctx.triggered and "place-order-btn" in ctx.triggered[0]["prop_id"] and place_order_clicks:
+                try:
+                    if not symbol or not order_side or not order_quantity:
+                        error_msg = "Please fill in all order fields"
+                    else:
+                        # Get current price from data store or use provided price
+                        current_price = order_price
+                        if not current_price and data_store and "df" in data_store:
+                            import pandas as pd
+                            df = pd.DataFrame(data_store["df"])
+                            if not df.empty and "Close" in df.columns:
+                                current_price = float(df["Close"].iloc[-1])
+                        
+                        if not current_price:
+                            error_msg = "Unable to determine current price. Please enter a price."
+                        else:
+                            # Place order
+                            order = paper_trading.place_order(
+                                symbol=symbol,
+                                side=order_side,
+                                quantity=float(order_quantity),
+                                price=current_price,
+                                order_type="MARKET"
+                            )
+                            success_msg = f"Order {order.order_id} {order.side} {order.quantity} {symbol} @ ${order.filled_price:.2f}"
+                except Exception as e:
+                    error_msg = f"Order error: {str(e)}"
+            
+            # Get current prices for portfolio update
+            current_prices = {}
+            if data_store and "df" in data_store:
+                import pandas as pd
+                df = pd.DataFrame(data_store["df"])
+                if not df.empty and "Close" in df.columns and symbol:
+                    current_prices[symbol] = float(df["Close"].iloc[-1])
+            
+            # Update positions with current prices
+            if current_prices:
+                paper_trading.update_positions(current_prices)
+            
+            # Get portfolio value
+            portfolio_value = paper_trading.get_portfolio_value(current_prices)
+            positions = paper_trading.get_positions()
+            recent_orders = paper_trading.get_recent_orders(limit=10)
+            
+            # Build UI
+            portfolio_cards = [
+                html.Div(
+                    [
+                        html.Div(f"${portfolio_value['cash']:,.2f}", className="metric-value", style={"color": "#7dd87d"}),
+                        html.Div("Available Cash", className="metric-label"),
+                    ],
+                    className="metric-card",
+                ),
+                html.Div(
+                    [
+                        html.Div(f"${portfolio_value['total_value']:,.2f}", className="metric-value", 
+                                style={"color": "#00bfff"}),
+                        html.Div("Total Value", className="metric-label"),
+                    ],
+                    className="metric-card",
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            f"${portfolio_value['total_pnl']:+,.2f} ({portfolio_value['total_pnl_pct']:+.2f}%)",
+                            className="metric-value",
+                            style={"color": "#00c853" if portfolio_value['total_pnl'] >= 0 else "#ff1744"},
+                        ),
+                        html.Div("Total P&L", className="metric-label"),
+                    ],
+                    className="metric-card",
+                ),
+                html.Div(
+                    [
+                        html.Div(f"{portfolio_value['num_positions']}", className="metric-value", style={"color": "#ff1493"}),
+                        html.Div("Open Positions", className="metric-label"),
+                    ],
+                    className="metric-card",
+                ),
+            ]
+            
+            # Order Entry Form
+            order_form = html.Div(
+                [
+                    html.Div("PLACE ORDER", style={"fontSize": "14px", "fontWeight": "600", "color": "#7dd87d", "marginBottom": "15px"}),
+                    html.Div(
+                        [
+                            html.Label("Side:", style={"color": "rgba(125, 216, 125, 0.8)", "marginRight": "10px", "width": "80px", "display": "inline-block"}),
+                            dcc.RadioItems(
+                                id="order-side",
+                                options=[
+                                    {"label": "BUY", "value": "BUY"},
+                                    {"label": "SELL", "value": "SELL"},
+                                ],
+                                value="BUY",
+                                inline=True,
+                                style={"display": "inline-block", "color": "#7dd87d"},
+                            ),
+                        ],
+                        style={"marginBottom": "10px"},
+                    ),
+                    html.Div(
+                        [
+                            html.Label("Quantity:", style={"color": "rgba(125, 216, 125, 0.8)", "marginRight": "10px", "width": "80px", "display": "inline-block"}),
+                            dcc.Input(
+                                id="order-quantity",
+                                type="number",
+                                value=1,
+                                min=0.01,
+                                step=0.01,
+                                style={"width": "120px", "backgroundColor": "#1a1a1a", "color": "#7dd87d", "border": "1px solid rgba(125, 216, 125, 0.3)", "padding": "5px"},
+                            ),
+                        ],
+                        style={"marginBottom": "10px"},
+                    ),
+                    html.Div(
+                        [
+                            html.Label("Price (optional):", style={"color": "rgba(125, 216, 125, 0.8)", "marginRight": "10px", "width": "80px", "display": "inline-block"}),
+                            dcc.Input(
+                                id="order-price",
+                                type="number",
+                                value=None,
+                                min=0,
+                                step=0.01,
+                                placeholder="Market Price",
+                                style={"width": "120px", "backgroundColor": "#1a1a1a", "color": "#7dd87d", "border": "1px solid rgba(125, 216, 125, 0.3)", "padding": "5px"},
+                            ),
+                        ],
+                        style={"marginBottom": "15px"},
+                    ),
+                    html.Button(
+                        "Place Order",
+                        id="place-order-btn",
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": "rgba(125, 216, 125, 0.2)",
+                            "border": "1px solid rgba(125, 216, 125, 0.5)",
+                            "color": "#7dd87d",
+                            "padding": "10px 30px",
+                            "borderRadius": "6px",
+                            "cursor": "pointer",
+                            "fontSize": "14px",
+                            "fontWeight": "600",
+                        },
+                    ),
+                    html.Div(success_msg, style={"color": "#7dd87d", "marginTop": "10px", "fontSize": "12px"}) if success_msg else html.Div(),
+                    html.Div(error_msg, style={"color": "#ff6b6b", "marginTop": "10px", "fontSize": "12px"}) if error_msg else html.Div(),
+                ],
+                style={
+                    "padding": "20px",
+                    "border": "1px solid rgba(125, 216, 125, 0.3)",
+                    "borderRadius": "6px",
+                    "marginBottom": "20px",
+                },
+            )
+            
+            # Positions Display
+            positions_display = html.Div()
+            if positions:
+                position_items = []
+                for pos in positions:
+                    pnl_color = "#00c853" if pos["unrealized_pnl"] >= 0 else "#ff1744"
+                    position_items.append(
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        html.Div(pos["symbol"], style={"fontWeight": "600", "color": "#7dd87d", "fontSize": "14px"}),
+                                        html.Div(f"Qty: {pos['quantity']:.2f}", style={"fontSize": "12px", "color": "rgba(125, 216, 125, 0.8)", "marginTop": "5px"}),
+                                    ],
+                                    style={"flex": "1"},
+                                ),
+                                html.Div(
+                                    [
+                                        html.Div(f"Entry: ${pos['avg_entry_price']:.2f}", style={"fontSize": "11px", "color": "rgba(125, 216, 125, 0.7)"}),
+                                        html.Div(f"Current: ${pos['current_price']:.2f}", style={"fontSize": "11px", "color": "rgba(125, 216, 125, 0.7)", "marginTop": "3px"}),
+                                    ],
+                                    style={"flex": "1", "textAlign": "right"},
+                                ),
+                                html.Div(
+                                    [
+                                        html.Div(
+                                            f"${pos['unrealized_pnl']:+,.2f}",
+                                            style={"fontSize": "14px", "fontWeight": "600", "color": pnl_color},
+                                        ),
+                                        html.Div(
+                                            f"({pos['unrealized_pnl_pct']:+.2f}%)",
+                                            style={"fontSize": "11px", "color": pnl_color, "marginTop": "3px"},
+                                        ),
+                                    ],
+                                    style={"flex": "1", "textAlign": "right"},
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "justifyContent": "space-between",
+                                "padding": "15px",
+                                "borderBottom": "1px solid rgba(125, 216, 125, 0.2)",
+                                "backgroundColor": "rgba(10, 10, 10, 0.5)",
+                            },
+                        )
+                    )
+                
+                positions_display = html.Div(
+                    [
+                        html.Div("OPEN POSITIONS", className="metrics-section-title"),
+                        html.Div(position_items),
+                    ],
+                    style={"marginTop": "20px"},
+                )
+            
+            # Recent Orders
+            orders_display = html.Div()
+            if recent_orders:
+                order_items = []
+                for order in recent_orders[-5:]:  # Show last 5
+                    side_color = "#00c853" if order["side"] == "BUY" else "#ff1744"
+                    order_items.append(
+                        html.Div(
+                            [
+                                html.Div(
+                                    [
+                                        html.Div(order["symbol"], style={"fontWeight": "600", "color": "#7dd87d"}),
+                                        html.Div(
+                                            order["timestamp"][:19],
+                                            style={"fontSize": "10px", "color": "rgba(125, 216, 125, 0.6)", "marginTop": "3px"},
+                                        ),
+                                    ],
+                                    style={"flex": "1"},
+                                ),
+                                html.Div(
+                                    [
+                                        html.Div(order["side"], style={"color": side_color, "fontWeight": "600"}),
+                                        html.Div(f"{order['filled_quantity']:.2f} @ ${order['filled_price']:.2f}", 
+                                                style={"fontSize": "11px", "color": "rgba(125, 216, 125, 0.8)", "marginTop": "3px"}),
+                                    ],
+                                    style={"flex": "1", "textAlign": "right"},
+                                ),
+                            ],
+                            style={
+                                "display": "flex",
+                                "justifyContent": "space-between",
+                                "padding": "10px",
+                                "borderBottom": "1px solid rgba(125, 216, 125, 0.1)",
+                            },
+                        )
+                    )
+                
+                orders_display = html.Div(
+                    [
+                        html.Div("RECENT ORDERS", className="metrics-section-title"),
+                        html.Div(order_items),
+                    ],
+                    style={"marginTop": "20px"},
+                )
+            
+            return html.Div(
+                [
+                    html.Div("PAPER TRADING", className="metrics-section-title"),
+                    html.Div(portfolio_cards, className="metrics-grid"),
+                    html.Div(
+                        [
+                            html.Div([order_form], style={"flex": "1", "marginRight": "20px"}),
+                            html.Div([positions_display, orders_display], style={"flex": "1"}),
+                        ],
+                        style={"display": "flex", "marginTop": "20px"},
+                    ),
+                ],
+                className="metrics-section",
+                style={
+                    "background": "linear-gradient(135deg, rgba(26, 26, 26, 0.95) 0%, rgba(15, 15, 15, 0.95) 100%)",
+                    "border": "1px solid rgba(125, 216, 125, 0.4)",
+                    "borderRadius": "6px",
+                    "padding": "20px",
+                    "margin": "20px 0",
+                },
+            )
 
     return dash_app
 

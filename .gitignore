@@ -23,16 +23,6 @@ Thumbs.db
 # Environment
 .env
 .env.local
-*.env
-
-# API Keys and Secrets - NEVER commit files with hardcoded keys
-setup_api_keys.py
-set_api_keys*.ps1
-*api_keys*.py
-*api_keys*.ps1
-secrets.py
-config.py
-credentials.py
 
 # Logs
 *.log
@@ -42,7 +32,8 @@ credentials.py
 
 # Data files (if large)
 *.csv
-*.json
-data/
+# Keep analysis logs structure but ignore large files
+data/analysis_logs/*.json
+!data/analysis_logs/.gitkeep
 
 
