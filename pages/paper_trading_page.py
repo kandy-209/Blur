@@ -20,7 +20,7 @@ def create_paper_trading_page(symbols: Dict = None) -> html.Div:
                 style={"marginBottom": "30px", "paddingBottom": "15px", "borderBottom": "1px solid rgba(125, 216, 125, 0.3)"},
             ),
             
-            # Symbol selector for paper trading
+            # Symbol selector for paper trading (needed for callback)
             html.Div(
                 [
                     html.Label("Symbol:", style={"color": "rgba(125, 216, 125, 0.8)", "marginRight": "10px", "width": "80px", "display": "inline-block"}),
@@ -35,44 +35,11 @@ def create_paper_trading_page(symbols: Dict = None) -> html.Div:
                 style={"marginBottom": "20px", "padding": "15px", "backgroundColor": "rgba(15, 15, 15, 0.5)", "borderRadius": "6px"},
             ),
             
-            # Order form components (required by callback)
-            html.Div(
-                [
-                    dcc.RadioItems(
-                        id="order-side",
-                        options=[
-                            {"label": "BUY", "value": "BUY"},
-                            {"label": "SELL", "value": "SELL"},
-                        ],
-                        value="BUY",
-                        inline=True,
-                        style={"display": "none"},  # Hidden, will be shown in the container
-                    ),
-                    dcc.Input(
-                        id="order-quantity",
-                        type="number",
-                        value=1,
-                        min=0.01,
-                        step=0.01,
-                        style={"display": "none"},  # Hidden, will be shown in the container
-                    ),
-                    dcc.Input(
-                        id="order-price",
-                        type="number",
-                        value=None,
-                        min=0,
-                        step=0.01,
-                        style={"display": "none"},  # Hidden, will be shown in the container
-                    ),
-                    html.Button(
-                        "Place Order",
-                        id="place-order-btn",
-                        n_clicks=0,
-                        style={"display": "none"},  # Hidden, will be shown in the container
-                    ),
-                ],
-                style={"display": "none"},
-            ),
+            # Placeholder components for callback State (will be replaced by callback output)
+            dcc.RadioItems(id="order-side", value="BUY", style={"display": "none"}),
+            dcc.Input(id="order-quantity", type="number", value=1, style={"display": "none"}),
+            dcc.Input(id="order-price", type="number", style={"display": "none"}),
+            html.Button(id="place-order-btn", n_clicks=0, style={"display": "none"}),
             
             html.Div(id="paper-trading-container"),
         ],
