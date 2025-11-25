@@ -1,22 +1,36 @@
+# Core dashboard dependencies
 dash>=2.14.0
 dash-auth>=1.5.1
 pandas>=2.0.0
 plotly>=5.17.0
 yfinance>=0.2.28
 gunicorn>=21.2.0
-pandas-ta>=0.3.14b0
 numpy>=1.24.0
-scikit-learn>=1.3.0
 requests>=2.31.0
+pytz>=2023.3
+
+# Technical analysis
+pandas-ta>=0.3.14b0
+
+# Machine learning (lightweight)
+scikit-learn>=1.3.0
+
+# Sentiment analysis
 textblob>=0.17.1
 vaderSentiment>=3.3.2
 beautifulsoup4>=4.12.0
+
+# Economic data
 fredapi>=0.5.1
-pytz>=2023.3
-ta-lib>=0.4.28
-openai>=1.0.0
-anthropic>=0.18.0
+
+# Scheduling
 schedule>=1.2.0
-xgboost>=2.0.0
-faiss-cpu>=1.7.4
-sentence-transformers>=2.2.0
+
+# Optional heavy packages (commented out to prevent build timeouts)
+# Uncomment only if you specifically need these features:
+# ta-lib>=0.4.28  # Requires system libraries, very slow build
+# xgboost>=2.0.0  # Slow to compile
+# faiss-cpu>=1.7.4  # Slow to build
+# sentence-transformers>=2.2.0  # Downloads large models (100MB+)
+# openai>=1.0.0  # Only if using OpenAI LLM features
+# anthropic>=0.18.0  # Only if using Anthropic LLM features
