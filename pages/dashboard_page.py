@@ -126,6 +126,12 @@ def create_dashboard_page(symbols: Dict) -> html.Div:
                 ],
             ),
             
+            # Additional containers for ML, News, Economic, Macro (populated by callbacks)
+            html.Div(id="ml-predictions-container", style={"marginBottom": "20px"}),
+            html.Div(id="news-container", style={"marginBottom": "20px"}),
+            html.Div(id="economic-indicators-container", style={"marginBottom": "20px"}),
+            html.Div(id="macro-research-container", style={"marginBottom": "20px"}),
+            
             # Note: Interval and stores are in main layout
         ],
         style={"padding": "20px"},

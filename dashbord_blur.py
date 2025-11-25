@@ -1835,7 +1835,29 @@ def create_dash_app():
                     f"No data available for {symbol}. Market may be closed or symbol unavailable.",
                     style={"color": "#ff6b6b", "textAlign": "center", "padding": "20px"}
                 )
-                return empty_fig, empty_fig, empty_fig, empty_fig, empty_fig, html.Div(), error_msg, error_msg, error_msg, error_msg, error_msg, html.Div(), html.Div(), html.Div(), html.Div()
+                # Return values matching the callback outputs
+                empty_base_returns = (
+                    empty_fig,  # price-graph
+                    empty_fig,  # rsi-graph
+                    empty_fig,  # macd-graph
+                    empty_fig,  # stoch-graph
+                    empty_fig,  # volume-graph
+                    html.Div(),  # market-status-banner
+                    error_msg,  # trading-signal-container
+                    error_msg,  # metrics-container
+                    error_msg,  # ml-predictions-container
+                    error_msg,  # news-container
+                    error_msg,  # economic-indicators-container
+                    html.Div(),  # macro-research-container
+                    html.Div(),  # rsi-education
+                    html.Div(),  # macd-education
+                    html.Div(),  # stoch-education
+                )
+                
+                if ENHANCEMENTS_AVAILABLE:
+                    return empty_base_returns + ({}, {})  # current-data-store, current-metrics-store
+                else:
+                    return empty_base_returns
             
             print(f"[SUCCESS] Fetched {len(df)} rows for {symbol}")
             
