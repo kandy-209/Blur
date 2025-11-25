@@ -1610,12 +1610,12 @@ def create_dash_app():
     def display_page(pathname):
         if pathname == "/paper-trading":
             if PAGES_AVAILABLE:
-                return create_paper_trading_page()
+                return create_paper_trading_page(symbols)
             else:
                 return html.Div("Paper Trading page not available")
         elif pathname == "/analytics":
             if PAGES_AVAILABLE:
-                return create_analytics_page()
+                return create_analytics_page(symbols)
             else:
                 return html.Div("Analytics page not available")
         elif pathname == "/settings":
