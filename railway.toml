@@ -1,5 +1,7 @@
 [build]
 builder = "nixpacks"
+# Increase build timeout if needed (default is 1800 seconds)
+# buildTimeout = 3600
 
 [deploy]
 startCommand = "python dashbord_blur.py"
